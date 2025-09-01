@@ -30,7 +30,7 @@ class Action(Base):
     action_type = Column(String, default="custom")
     config = Column(JSON, nullable=True)
     yaml_spec = Column(Text, nullable=True)
-    api_key = Column(String, nullable=True)  # Novo campo para API Key
+    api_key = Column(String, nullable=True) 
     is_active = Column(Boolean, default=True)
 
 class Agent(Base):
