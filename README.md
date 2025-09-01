@@ -8,6 +8,7 @@ A powerful platform for creating and managing AI agents with intelligent action 
 - Docker and Docker Compose installed
 - 4GB+ available RAM
 - Internet connection for LLM API calls
+  - All tests cases were implemented with this LLM: "gpt-3.5-turbo" 
 - LLM Studio for local tests
   - All local tests cases were implemented with this LLM: "meta-llama-3.1-8b-instruct" 
 
