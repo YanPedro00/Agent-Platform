@@ -124,6 +124,7 @@ After setting up your LLM, verify it's working:
        "llm_id": 1
      }
      ```
+   - Add a Respond action.
 
 2. **Test the Agent**:
    - Go to "Agent Runner"
