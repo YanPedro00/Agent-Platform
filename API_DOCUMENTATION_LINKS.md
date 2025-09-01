@@ -76,7 +76,7 @@ docker-compose ps
 - `DELETE /agents/{id}` - Delete agent
 - `POST /agents/{id}/run` - Execute agent
 
-### **⚡ Actions**
+### Actions**
 - `GET /actions/` - List actions
 - `POST /actions/` - Create action
 - `PUT /actions/{id}` - Update action
