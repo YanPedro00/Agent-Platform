@@ -175,9 +175,3 @@ The backend is configured to accept:
 - `http://localhost:3000`
 - `http://127.0.0.1:3000`
 - `http://172.19.0.3:3000`
-
-## **Summary**
-
-### **Correct Links:**
-- **API Docs**: `http://localhost:8000/docs`
-- **Frontend**: `http://localhost:3000`
