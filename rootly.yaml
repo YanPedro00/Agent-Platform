@@ -1,0 +1,46 @@
+openapi: 3.0.0
+info:
+  title: Rootly Incident Lookup
+  description: Get title and description of a incident ticket by ID
+  version: 1.0.0
+servers:
+  - url: https://api.rootly.com/v1
+paths:
+  /incidents/{id}:
+    get:
+      summary: Get incident title and description
+      operationId: getIncidentBasicInfo
+      parameters:
+        - name: id
+          in: path
+          description: Incident ID
+          required: true
+          schema:
+            type: string
+          example: "1124-user-authentication-service-failure"
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      attributes:
+                        type: object
+                        properties:
+                          title:
+                            type: string
+                          summary:
+                            type: string
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
