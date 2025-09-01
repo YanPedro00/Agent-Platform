@@ -12,8 +12,8 @@ A powerful platform for creating and managing AI agents with intelligent action 
 ### Start the Platform
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd agent-platform
+git clone https://github.com/YanPedro00/Agent-Platform.git
+cd Agent-Platform
 
 # Build and start all services
 docker-compose up --build
@@ -66,23 +66,41 @@ Run agents with real-time feedback:
 ## 🏗️ Platform Architecture
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Frontend      │    │    Backend      │    │   Database      │
-│   (React)       │◄──►│   (FastAPI)     │◄──►│   (SQLite)      │
-│   Port: 3000    │    │   Port: 8000    │    │   Persistent    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-                              │
-                    ┌─────────┴─────────┐
-                    │   Action Manager  │
-                    └─────────┬─────────┘
-                              │
-            ┌─────────────────┼─────────────────┐
-            │                 │                 │
-    ┌───────▼────────┐ ┌──────▼──────┐ ┌───────▼────────┐
-    │ Native Actions │ │ Custom APIs │ │ LLM Providers  │
-    │ • Thinking     │ │ • REST APIs │ │ • OpenAI       │
-    │ • Respond      │ │ • Auth      │ │ • LM Studio    │
-    └────────────────┘ └─────────────┘ └────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                        Docker Environment                        │
+├─────────────────┬─────────────────┬─────────────────────────────┤
+│   Frontend      │    Backend      │        Database             │
+│   (React)       │   (FastAPI)     │       (SQLite)              │
+│   Node 18       │   Python 3.11   │    Volume: db_data          │
+│   Port: 3000    │   Port: 8000    │    File: app.db             │
+└─────────┬───────┴─────────┬───────┴─────────────────────────────┘
+          │                 │
+          │ HTTP Requests   │ Database Queries
+          │                 │
+          └─────────────────┼─────────────────────────────────────┐
+                            │                                     │
+                  ┌─────────▼─────────┐                          │
+                  │   Action Manager  │                          │
+                  │   Agent Manager   │                          │
+                  │   LLM Manager     │                          │
+                  └─────────┬─────────┘                          │
+                            │                                     │
+          ┌─────────────────┼─────────────────┐                  │
+          │                 │                 │                  │
+  ┌───────▼────────┐ ┌──────▼──────┐ ┌───────▼────────┐          │
+  │ Native Actions │ │ Custom APIs │ │ LLM Providers  │          │
+  │ • Thinking     │ │ • REST APIs │ │ • OpenAI       │          │
+  │ • Respond      │ │ • Headers   │ │ • LM Studio    │          │
+  │                │ │ • Auth      │ │ • Ollama       │          │
+  └────────────────┘ └─────────────┘ └────────────────┘          │
+                                                                  │
+┌─────────────────────────────────────────────────────────────────┘
+│                    External Services                            
+├─────────────────┬─────────────────┬─────────────────────────────
+│   OpenAI API    │   Custom APIs   │    Local LLM Servers        
+│   GPT Models    │   (Rootly, etc) │    (LM Studio, Ollama)      
+│   Internet      │   Internet      │    localhost:1234           
+└─────────────────┴─────────────────┴─────────────────────────────
 ```
 
 ## 📋 Features Overview
@@ -114,22 +132,37 @@ Run agents with real-time feedback:
 ## 🛠️ Container Details
 
 ### Backend Container
-- **Image**: Python 3.11 with FastAPI
+- **Image**: Python 3.11-slim with FastAPI
 - **Port**: 8000 (mapped to localhost:8000)
 - **Features**: REST API, action execution, database management
-- **Health Check**: Automatic service monitoring
+- **Volume**: `./backend:/app` for live code updates
 
 ### Frontend Container
-- **Image**: Node.js with React
+- **Image**: Node.js 18-alpine with React
 - **Port**: 3000 (mapped to localhost:3000)
 - **Features**: Web interface, agent management, action testing
+- **Volume**: `./frontend:/app` for live code updates
 - **Hot Reload**: Development mode with live updates
 
 ### Database
 - **Type**: SQLite file-based database
-- **Location**: `./backend/data/app.db`
-- **Persistence**: Data survives container restarts
-- **Backup**: Automatic schema creation and migration
+- **Location**: `./backend/data/app.db` (Docker volume: `db_data`)
+- **Persistence**: Data survives container restarts via named volume
+- **Schema**: Automatic table creation and migration on startup
+
+## 📁 Included Files
+
+### Example Files
+- **`rootly.yaml`**: Example OpenAPI specification for Rootly incident management API
+- **`EXAMPLE_USAGE.md`**: Comprehensive usage guide with step-by-step examples
+- **`TESTING_IMPROVEMENTS.md`**: Documentation of testing system features
+- **`API_DOCUMENTATION_LINKS.md`**: Guide to accessing API documentation
+- **`examples/agent_examples.md`**: Pre-configured agent examples and best practices
+
+### Key Directories
+- **`backend/app/`**: Core Python modules (managers, models, schemas)
+- **`frontend/src/pages/`**: React components for each management interface
+- **`frontend/src/services/`**: API client configuration
 
 ## 📖 Usage Examples
 
@@ -147,6 +180,8 @@ Run agents with real-time feedback:
 
 2. **Create Custom Action** (Optional):
    Upload YAML for external APIs like Wikipedia, weather services, etc.
+   - Use the included `rootly.yaml` as an example
+   - See `EXAMPLE_USAGE.md` for detailed walkthrough
 
 3. **Build Agent**:
    ```json
@@ -172,7 +207,7 @@ Run agents with real-time feedback:
 
 1. **Upload YAML Specification**:
    - Go to Actions → YAML Upload
-   - Upload your OpenAPI/YAML file
+   - Upload your OpenAPI/YAML file (try `rootly.yaml` included in the repo)
    - Add API key if required
 
 2. **Test the Action**:
@@ -321,34 +356,14 @@ services:
 ### Development Setup
 ```bash
 # Fork and clone the repository
-git clone <your-fork-url>
-cd agent-platform
+git clone https://github.com/YanPedro00/Agent-Platform.git
+cd Agent-Platform
 
 # Start development environment
 docker-compose up --build
 
-# Make changes and test
-# Submit pull request
-```
+# Access the platform
+Then visit http://localhost:3000 to begin!
 
-### Code Style
-- **Backend**: Follow PEP 8 for Python
-- **Frontend**: Use ESLint and Prettier
-- **Documentation**: Update README for new features
-- **Tests**: Add tests for new functionality
-
-## 📄 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
----
-
-## 🎉 Ready to Build?
-
-Start creating your AI agents now:
-
-```bash
-docker-compose up --build
-```
-
-Then visit **http://localhost:3000** to begin! 🚀
+# Read documentation for detailed usage
+See EXAMPLE_USAGE.md for comprehensive examples and use cases
