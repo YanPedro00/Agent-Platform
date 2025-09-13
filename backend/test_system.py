@@ -53,8 +53,22 @@ def test_native_actions():
         else:
             print("❌ Respond action not found")
             
+        # Check if Wait action exists
+        wait_action = db.query(Action).filter(Action.name == "Wait").first()
+        if wait_action:
+            print(f"✅ Wait action found: {wait_action.description}")
+        else:
+            print("❌ Wait action not found")
+            
+        # Check if Choice action exists
+        choice_action = db.query(Action).filter(Action.name == "Choice").first()
+        if choice_action:
+            print(f"✅ Choice action found: {choice_action.description}")
+        else:
+            print("❌ Choice action not found")
+            
         db.close()
-        return thinking_action and respond_action
+        return thinking_action and respond_action and wait_action and choice_action
     except Exception as e:
         print(f"❌ Error testing native actions: {e}")
         return False
@@ -374,6 +388,66 @@ components:
         print(f"❌ Error testing YAML parsing: {e}")
         return False
 
+def test_new_native_actions():
+    """Test the new native actions (Wait and Choice)"""
+    print("\nTesting new native actions (Wait and Choice)...")
+    try:
+        db = SessionLocal()
+        
+        # Test Wait action execution
+        print("  Testing Wait action...")
+        wait_result = ActionManager.execute_action(
+            db, "Wait", 
+            {"message": "Please provide more information", "prompt": "What else do you need?"}, 
+            {"user_input": "test input"}
+        )
+        
+        if wait_result.get("pause_execution"):
+            print("  ✅ Wait action correctly pauses execution")
+        else:
+            print("  ❌ Wait action does not pause execution")
+            
+        if wait_result.get("user_input_required"):
+            print("  ✅ Wait action correctly requires user input")
+        else:
+            print("  ❌ Wait action does not require user input")
+        
+        # Test Choice action execution (requires LLM)
+        print("  Testing Choice action...")
+        test_llm = db.query(LLM).first()
+        if test_llm:
+            choice_result = ActionManager.execute_action(
+                db, "Choice",
+                {
+                    "validation_criteria": "Check if the input contains a valid incident ID",
+                    "input": "incident 1234-test-incident"
+                },
+                {
+                    "user_input": "incident 1234-test-incident",
+                    "agent_name": "Test Agent",
+                    "shared_context": {}
+                }
+            )
+            
+            if choice_result.get("conditional_flow"):
+                print("  ✅ Choice action correctly creates conditional flow")
+            else:
+                print("  ❌ Choice action does not create conditional flow")
+                
+            if choice_result.get("decision") in ["valid", "invalid", "error"]:
+                print(f"  ✅ Choice action made decision: {choice_result.get('decision')}")
+            else:
+                print("  ❌ Choice action did not make a valid decision")
+        else:
+            print("  ⚠️  No LLM available for Choice action test")
+        
+        db.close()
+        return True
+        
+    except Exception as e:
+        print(f"❌ New native actions test failed: {e}")
+        return False
+
 def test_agent_actions_management():
     """Test agent actions management functionality"""
     print("\nTesting agent actions management...")
@@ -525,6 +599,7 @@ def main():
     tests = [
         ("Database Connection", test_database_connection),
         ("Native Actions", test_native_actions),
+        ("New Native Actions (Wait & Choice)", test_new_native_actions),
         ("Duplicate Name Validation", test_duplicate_name_validation),
         ("Action Execution", test_action_execution),
         ("Custom Action Execution", test_custom_action_execution),

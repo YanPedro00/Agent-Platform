@@ -2,6 +2,10 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.llm_manager import LLMManager
 from app.action_manager import ActionManager
+from app.utils import (
+    safe_json_parse, ContextBuilder, clean_action_result,
+    handle_exceptions, format_llm_prompt
+)
 from typing import List, Dict, Any
 import json
 import re
@@ -45,19 +49,14 @@ Extract parameters now (JSON only):"""
             response = LLMManager.call_llm(llm, extraction_prompt, temperature=0.1)
             
             # Try to parse the JSON response
-            try:
-                # Clean the response to extract JSON
-                json_match = re.search(r'\{.*\}', response, re.DOTALL)
-                if json_match:
-                    extracted_params = json.loads(json_match.group())
-                    # Filter out null values and validate against action parameters
-                    valid_params = {}
-                    for param_name, param_value in extracted_params.items():
-                        if param_name in action.parameters and param_value is not None:
-                            valid_params[param_name] = param_value
-                    return valid_params
-            except json.JSONDecodeError:
-                pass
+            extracted_params = safe_json_parse(response)
+            if extracted_params:
+                # Filter out null values and validate against action parameters
+                valid_params = {}
+                for param_name, param_value in extracted_params.items():
+                    if param_name in action.parameters and param_value is not None:
+                        valid_params[param_name] = param_value
+                return valid_params
                 
             return {}
             
@@ -68,42 +67,31 @@ Extract parameters now (JSON only):"""
     @staticmethod
     def build_enhanced_context(context: Dict[str, Any], action_result: Dict[str, Any], action_name: str) -> Dict[str, Any]:
         """Build enhanced context with action results and extracted information"""
-        enhanced_context = context.copy()
+        # Use ContextBuilder for cleaner context management
+        builder = ContextBuilder(
+            context.get("user_input", ""),
+            context.get("agent_name", "")
+        )
         
-        # Add action result to context
-        enhanced_context["action_results"][action_name] = action_result
+        # Copy existing context
+        builder.context.update(context)
         
-        # Extract and store key information from action results
-        if action_result.get("type") == "custom_action" and action_result.get("success"):
-            # For custom actions, extract useful data
-            result_data = action_result.get("result", {})
-            if isinstance(result_data, dict):
-                # Store filtered data if available (from YAML schema filtering)
-                if "filtered_data" in result_data:
-                    enhanced_context[f"{action_name}_data"] = result_data["filtered_data"]
-                elif "data" in result_data:
-                    enhanced_context[f"{action_name}_data"] = result_data["data"]
+        # Add action result
+        builder.add_action_result(action_name, action_result)
         
-        # For thinking actions, add to thinking process
+        # Add thinking if it's a thinking action
         if action_result.get("type") == "thinking":
-            enhanced_context["thinking_process"].append({
-                "action": action_name,
-                "content": action_result.get("content", ""),
-                "timestamp": "now"  # Could add actual timestamp
-            })
+            builder.add_thinking(action_name, action_result.get("content", ""))
         
-        # Update conversation history
-        if "conversation_history" not in enhanced_context:
-            enhanced_context["conversation_history"] = []
+        # Add conversation entry
+        builder.add_conversation_entry(
+            action_name,
+            action_result.get("type", "unknown"),
+            action_result.get("content", ""),
+            action_result.get("background", False)
+        )
         
-        enhanced_context["conversation_history"].append({
-            "action": action_name,
-            "type": action_result.get("type", "unknown"),
-            "content": action_result.get("content", ""),
-            "background": action_result.get("background", False)
-        })
-        
-        return enhanced_context
+        return builder.build()
 
     @staticmethod
     def create_agent(db: Session, agent: schemas.AgentCreate):
@@ -129,6 +117,7 @@ Extract parameters now (JSON only):"""
             system_prompt=agent.system_prompt,
             llm_id=agent.llm_id,
             actions=[action.dict() for action in agent.actions],
+            conditional_flows=[flow.dict() for flow in agent.conditional_flows] if agent.conditional_flows else [],
             config=agent.config
         )
         db.add(db_agent)
@@ -141,6 +130,150 @@ Extract parameters now (JSON only):"""
         return db.query(models.Agent).offset(skip).limit(limit).all()
 
     @staticmethod
+    def _execute_action_flow(db: Session, agent: models.Agent, actions: List[Dict], shared_context: Dict, llm: models.LLM, input_data: schemas.AgentRun, flow_type: str = "main"):
+        """Execute a flow of actions with support for conditional branching and Wait actions"""
+        actions_used = []
+        background_actions = []
+        user_facing_actions = []
+        
+        for i, action_config in enumerate(actions):
+            # Skip actions that don't belong to this flow
+            if action_config.get("flow_type", "main") != flow_type:
+                continue
+                
+            action_name = action_config["action_name"]
+            print(f"📋 Executing action {i+1}/{len(actions)}: {action_name} (flow: {flow_type})")
+            
+            actions_used.append(action_name)
+            
+            # Extract parameters intelligently from context for this action
+            extracted_params = AgentManager.extract_parameters_from_context(
+                db, action_name, shared_context, llm
+            )
+            
+            print(f"🔍 Extracted parameters for {action_name}: {extracted_params}")
+            
+            # Prepare action parameters
+            action_parameters = {"input": input_data.input}
+            action_parameters.update(extracted_params)
+            
+            # Add validation criteria for Choice actions
+            if action_name == "Choice":
+                action_parameters["validation_criteria"] = action_config.get("prompt", "Validate the provided information")
+            
+            # Add wait message for Wait actions
+            if action_name == "Wait":
+                action_parameters["message"] = action_config.get("prompt", "Please provide additional information to continue.")
+                action_parameters["prompt"] = action_config.get("wait_prompt", "What additional information would you like to provide?")
+            
+            # Add custom prompt for Respond actions
+            if action_name == "Respond":
+                action_parameters["prompt"] = action_config.get("prompt", "")
+            
+            # Execute the action with enhanced context and extracted parameters
+            action_result = ActionManager.execute_action(
+                db, action_name, action_parameters, shared_context
+            )
+            
+            print(f"✅ Action {action_name} completed: {action_result.get('type', 'unknown')} - Success: {action_result.get('success', True)}")
+            
+            # Handle Wait action - pause execution and return
+            if action_result.get("pause_execution"):
+                return {
+                    "wait_required": True,
+                    "wait_message": action_result.get("content", "Please provide additional information."),
+                    "wait_prompt": action_result.get("prompt", "What would you like to add?"),
+                    "actions_used": actions_used,
+                    "background_actions": background_actions,
+                    "user_facing_actions": user_facing_actions,
+                    "shared_context": shared_context
+                }
+            
+            # Update shared context with action result
+            if action_result:
+                shared_context = AgentManager.build_enhanced_context(
+                    shared_context, action_result, action_name
+                )
+                
+                # Handle Choice action - execute conditional flow
+                if action_result.get("conditional_flow"):
+                    decision = action_result.get("decision", "invalid")
+                    next_flow = "valid_flow" if decision == "valid" else "invalid_flow"
+                    
+                    print(f"🔀 Choice action decided: {decision} -> executing {next_flow}")
+                    
+                    # Find and execute the appropriate conditional flow
+                    conditional_flows = getattr(agent, 'conditional_flows', []) or []
+                    for flow in conditional_flows:
+                        if flow.get("choice_action") == action_name:
+                            flow_actions = flow.get(next_flow, [])
+                            if flow_actions:
+                                # Recursively execute the conditional flow
+                                agent_manager = AgentManager()
+                                conditional_result = agent_manager._execute_action_flow(
+                                    db, agent, flow_actions, shared_context, llm, input_data, next_flow
+                                )
+                                
+                                # Merge results
+                                actions_used.extend(conditional_result["actions_used"])
+                                background_actions.extend(conditional_result["background_actions"])
+                                user_facing_actions.extend(conditional_result["user_facing_actions"])
+                                shared_context = conditional_result["shared_context"]
+                                
+                                # Handle wait from conditional flow
+                                if conditional_result.get("wait_required"):
+                                    return conditional_result
+                            break
+                    
+                    # Add the choice action to background actions
+                    background_actions.append({
+                        "action": action_name,
+                        "result": action_result,
+                        "parameters_used": extracted_params,
+                        "iteration": len(background_actions) + 1,
+                        "choice_decision": decision
+                    })
+                    
+                # Handle other action types
+                elif action_result.get("background", False):
+                    # Background action (like Thinking) - enriches context
+                    background_actions.append({
+                        "action": action_name,
+                        "result": action_result,
+                        "parameters_used": extracted_params,
+                        "iteration": len(background_actions) + 1
+                    })
+                    print(f"🧠 Background action {action_name} added to context")
+                    
+                elif action_name == "Respond":
+                    # User-facing response action
+                    user_facing_actions.append({
+                        "action": action_name,
+                        "result": action_result,
+                        "parameters_used": extracted_params,
+                        "iteration": len(user_facing_actions) + 1
+                    })
+                    print(f"💬 Response action {action_name} completed")
+                    
+                else:
+                    # Custom actions (like Rootly API calls)
+                    background_actions.append({
+                        "action": action_name,
+                        "result": action_result,
+                        "parameters_used": extracted_params,
+                        "iteration": len(background_actions) + 1,
+                        "custom_action": True
+                    })
+                    print(f"🔧 Custom action {action_name} completed and added to context")
+        
+        return {
+            "actions_used": actions_used,
+            "background_actions": background_actions,
+            "user_facing_actions": user_facing_actions,
+            "shared_context": shared_context
+        }
+
+    @staticmethod
     def run_agent(db: Session, agent_id: int, input_data: schemas.AgentRun):
         try:
             agent = db.query(models.Agent).filter(models.Agent.id == agent_id).first()
@@ -151,98 +284,73 @@ Extract parameters now (JSON only):"""
             if not llm:
                 return {"error": f"LLM with id {agent.llm_id} not found"}
 
-            # Initialize enhanced context for intelligent action execution
-            shared_context = {
-                "user_input": input_data.input,
-                "agent_name": agent.name,
+            # Initialize enhanced context using ContextBuilder
+            context_builder = ContextBuilder(input_data.input, agent.name)
+            context_builder.context.update({
                 "available_actions": [action["action_name"] for action in agent.actions],
-                "action_results": {},
-                "thinking_process": [],
-                "conversation_history": [],
                 "extracted_entities": {},  # Store extracted IDs, names, etc.
                 "session_data": {}  # Persistent data across actions
-            }
+            })
+            shared_context = context_builder.build()
 
             # Execute actions in sequence with intelligent parameter extraction
             actions_used = []
             background_actions = []
             user_facing_actions = []
             
-            # Check if agent has required actions
+            # Check if agent has required actions (in main flow or conditional flows)
             has_respond_action = any(action["action_name"] == "Respond" for action in agent.actions)
-            if not has_respond_action:
+            has_wait_action = any(action["action_name"] == "Wait" for action in agent.actions)
+            
+            # Also check conditional flows for Respond actions
+            if not has_respond_action and hasattr(agent, 'conditional_flows') and agent.conditional_flows:
+                for flow in agent.conditional_flows:
+                    if isinstance(flow, dict):
+                        # Check valid_flow
+                        if flow.get("valid_flow"):
+                            has_respond_action = has_respond_action or any(
+                                action.get("action_name") == "Respond" for action in flow["valid_flow"]
+                            )
+                        # Check invalid_flow
+                        if flow.get("invalid_flow"):
+                            has_respond_action = has_respond_action or any(
+                                action.get("action_name") == "Respond" for action in flow["invalid_flow"]
+                            )
+            
+            # If agent has Wait action, it's valid even without immediate Respond
+            # because Respond will come after user provides additional input
+            if not has_respond_action and not has_wait_action:
                 return {
                     "response": None,
                     "actions_used": [],
                     "background_actions": [],
                     "user_facing_actions": [],
-                    "message": "Agent has no Respond action configured"
+                    "message": "Agent must have either a Respond action or a Wait action to interact with users"
                 }
             
             print(f"🤖 Agent {agent.name} starting execution with {len(agent.actions)} actions")
             
-            # Execute each action in the configured order
-            for i, action_config in enumerate(agent.actions):
-                action_name = action_config["action_name"]
-                print(f"📋 Executing action {i+1}/{len(agent.actions)}: {action_name}")
-                
-                actions_used.append(action_name)
-                
-                # Extract parameters intelligently from context for this action
-                extracted_params = AgentManager.extract_parameters_from_context(
-                    db, action_name, shared_context, llm
-                )
-                
-                print(f"🔍 Extracted parameters for {action_name}: {extracted_params}")
-                
-                # Prepare action parameters
-                action_parameters = {"input": input_data.input}
-                action_parameters.update(extracted_params)
-                
-                # Execute the action with enhanced context and extracted parameters
-                action_result = ActionManager.execute_action(
-                    db, action_name, action_parameters, shared_context
-                )
-                
-                print(f"✅ Action {action_name} completed: {action_result.get('type', 'unknown')} - Success: {action_result.get('success', True)}")
-                
-                # Update shared context with action result using enhanced context builder
-                if action_result:
-                    shared_context = AgentManager.build_enhanced_context(
-                        shared_context, action_result, action_name
-                    )
-                    
-                    # Handle different types of actions
-                    if action_result.get("background", False):
-                        # Background action (like Thinking) - enriches context
-                        background_actions.append({
-                            "action": action_name,
-                            "result": action_result,
-                            "parameters_used": extracted_params,
-                            "iteration": len(background_actions) + 1
-                        })
-                        print(f"🧠 Background action {action_name} added to context")
-                        
-                    elif action_name == "Respond":
-                        # User-facing response action
-                        user_facing_actions.append({
-                            "action": action_name,
-                            "result": action_result,
-                            "parameters_used": extracted_params,
-                            "iteration": len(user_facing_actions) + 1
-                        })
-                        print(f"💬 Response action {action_name} completed")
-                        
-                    else:
-                        # Custom actions (like Rootly API calls)
-                        background_actions.append({
-                            "action": action_name,
-                            "result": action_result,
-                            "parameters_used": extracted_params,
-                            "iteration": len(background_actions) + 1,
-                            "custom_action": True
-                        })
-                        print(f"🔧 Custom action {action_name} completed and added to context")
+            # Execute actions with support for conditional flows and Wait actions
+            execution_result = AgentManager._execute_action_flow(
+                db, agent, agent.actions, shared_context, llm, input_data
+            )
+            
+            actions_used = execution_result["actions_used"]
+            background_actions = execution_result["background_actions"]
+            user_facing_actions = execution_result["user_facing_actions"]
+            shared_context = execution_result["shared_context"]
+            
+            # Handle Wait action result if present
+            if execution_result.get("wait_required"):
+                return {
+                    "wait_required": True,
+                    "wait_message": execution_result["wait_message"],
+                    "wait_prompt": execution_result["wait_prompt"],
+                    "session_context": shared_context,
+                    "actions_used": actions_used,
+                    "background_actions": background_actions,
+                    "user_facing_actions": user_facing_actions
+                }
 
             # Extract final response from Respond actions
             final_user_message = None
@@ -262,31 +370,7 @@ Extract parameters now (JSON only):"""
                 }
 
             # Clean up actions for response (remove circular references and sensitive data)
-            clean_background_actions = []
-            for action in background_actions:
-                clean_action = {
-                    "action": action.get("action", "Unknown"),
-                    "iteration": action.get("iteration", 0),
-                    "parameters_used": action.get("parameters_used", {}),
-                    "custom_action": action.get("custom_action", False),
-                    "result": {
-                        "type": action.get("result", {}).get("type", "unknown"),
-                        "success": action.get("result", {}).get("success", True),
-                        "background": action.get("result", {}).get("background", True)
-                    }
-                }
-                
-                # Add summary of result content without exposing sensitive data
-                result = action.get("result", {})
-                if result.get("type") == "thinking":
-                    clean_action["result"]["summary"] = "Thinking process completed"
-                elif result.get("type") == "custom_action":
-                    if result.get("success"):
-                        clean_action["result"]["summary"] = f"API call successful (status: {result.get('status_code', 'unknown')})"
-                    else:
-                        clean_action["result"]["summary"] = f"API call failed: {result.get('error', 'Unknown error')}"
-                
-                clean_background_actions.append(clean_action)
+            clean_background_actions = [clean_action_result(action) for action in background_actions]
             
             clean_user_facing_actions = []
             for action in user_facing_actions:

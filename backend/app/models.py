@@ -42,6 +42,7 @@ class Agent(Base):
     system_prompt = Column(Text)
     llm_id = Column(Integer, ForeignKey("llms.id"))
     actions = Column(JSON)  # list of action configurations with prompts
+    conditional_flows = Column(JSON)  # conditional flows for Choice actions
     config = Column(JSON)   # agent-specific configuration
     is_active = Column(Boolean, default=True)
 

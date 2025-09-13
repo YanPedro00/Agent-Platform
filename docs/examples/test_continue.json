@@ -1,0 +1,13 @@
+{
+  "session_context": {
+    "user_input": "test message",
+    "agent_name": "Agent",
+    "available_actions": ["Thinking", "Wait", "Choice"],
+    "action_results": {},
+    "thinking_process": [],
+    "conversation_history": [],
+    "extracted_entities": {},
+    "session_data": {}
+  },
+  "additional_input": "1234-auth-failure"
+}

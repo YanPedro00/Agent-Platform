@@ -1,5 +1,10 @@
 from sqlalchemy.orm import Session
 from app import models, schemas
+from app.utils import (
+    safe_json_parse, mask_sensitive_fields, validate_url, 
+    extract_id_from_url, handle_exceptions, build_error_response,
+    build_success_response, sanitize_yaml_content
+)
 import requests
 import json
 import yaml
@@ -14,7 +19,7 @@ class ActionManager:
             raise ValueError(f"Action with name '{action.name}' already exists")
         
         # Sanitize YAML spec to remove API keys before storing
-        sanitized_yaml_spec = ActionManager.sanitize_yaml_spec(action.yaml_spec, action.api_key)
+        sanitized_yaml_spec = sanitize_yaml_content(action.yaml_spec, action.api_key)
         
         db_action = models.Action(
             name=action.name,
@@ -75,6 +80,94 @@ Provide a focused analysis that highlights the most important aspects for fulfil
                 "purpose": "analysis_and_extraction"
             }
         
+        elif action.name == "Wait":
+            # Wait action pauses execution and prompts user for additional input
+            wait_message = parameters.get('message', 'Please provide additional information to continue.')
+            wait_prompt = parameters.get('prompt', 'What additional information would you like to provide?')
+            
+            return {
+                "type": "wait",
+                "content": wait_message,
+                "prompt": wait_prompt,
+                "background": False,
+                "user_input_required": True,
+                "pause_execution": True
+            }
+        
+        elif action.name == "Choice":
+            # Choice action makes decisions based on validation and creates conditional flows
+            from app.llm_manager import LLMManager
+            from app.models import Agent
+            
+            # Get the agent and LLM from context
+            agent_name = context.get("agent_name") if context else None
+            if agent_name:
+                agent = db.query(Agent).filter(Agent.name == agent_name).first()
+                if agent and agent.llm:
+                    validation_criteria = parameters.get('validation_criteria', 'Validate the provided information')
+                    user_input = parameters.get('input', context.get('user_input', ''))
+                    context_data = context.get('shared_context', {}) if context else {}
+                    
+                    # Build validation prompt
+                    choice_prompt = f"""You are making a decision based on validation criteria. Analyze the information and determine if it meets the specified criteria.
+
+VALIDATION CRITERIA: {validation_criteria}
+
+USER INPUT: {user_input}
+
+AVAILABLE CONTEXT: {json.dumps(context_data, indent=2)}
+
+INSTRUCTIONS:
+1. Carefully evaluate the information against the validation criteria
+2. Consider all available context and data
+3. Make a clear decision: VALID or INVALID
+4. Provide a brief explanation for your decision
+
+Your response must start with either "VALID:" or "INVALID:" followed by your explanation.
+
+Decision:"""
+                    
+                    try:
+                        llm_response = LLMManager.call_llm(
+                            agent.llm,
+                            choice_prompt,
+                            conversation_history=[],
+                            temperature=0.3  # Lower temperature for more consistent decisions
+                        )
+                        
+                        # Parse the LLM response to determine the choice
+                        response_text = llm_response.strip()
+                        is_valid = response_text.upper().startswith("VALID:")
+                        explanation = response_text.split(":", 1)[1].strip() if ":" in response_text else response_text
+                        
+                        return {
+                            "type": "choice",
+                            "decision": "valid" if is_valid else "invalid",
+                            "explanation": explanation,
+                            "full_response": response_text,
+                            "background": True,
+                            "conditional_flow": True,
+                            "next_flow": "valid_flow" if is_valid else "invalid_flow"
+                        }
+                    except Exception as e:
+                        return {
+                            "type": "choice",
+                            "decision": "error",
+                            "explanation": f"Error during validation: {str(e)}",
+                            "background": True,
+                            "conditional_flow": True,
+                            "next_flow": "invalid_flow"  # Default to invalid flow on error
+                        }
+            
+            return {
+                "type": "choice",
+                "decision": "error",
+                "explanation": "No agent or LLM configured for choice validation",
+                "background": True,
+                "conditional_flow": True,
+                "next_flow": "invalid_flow"
+            }
+        
         elif action.name == "Respond":
             # Respond action generates user-facing messages using the LLM with full context
             from app.llm_manager import LLMManager
@@ -87,9 +180,29 @@ Provide a focused analysis that highlights the most important aspects for fulfil
                 agent = db.query(Agent).filter(Agent.name == agent_name).first()
                 if agent and agent.llm:
                     user_input = parameters.get("input", "")
+                    custom_prompt = parameters.get("prompt", "")
                     
-                    # Build a focused response prompt that uses context internally but responds only to user request
-                    response_prompt = f"""You are an intelligent assistant. The user has made a specific request, and you have gathered relevant information through various actions. Your job is to provide a direct, focused response to ONLY what the user asked for.
+                    # If there's a custom prompt (from conditional flows), use it directly
+                    if custom_prompt and custom_prompt.strip():
+                        # Simple custom prompt execution
+                        if custom_prompt.lower().startswith("respond"):
+                            # Extract the response content from "Respond \"Valid\"" format
+                            import re
+                            match = re.search(r'respond\s*["\']([^"\']*)["\']', custom_prompt, re.IGNORECASE)
+                            if match:
+                                return {
+                                    "type": "response",
+                                    "content": match.group(1),
+                                    "background": False,
+                                    "user_message": True,
+                                    "custom_prompt_used": True
+                                }
+                        
+                        # Use custom prompt as is
+                        response_prompt = custom_prompt
+                    else:
+                        # Build a focused response prompt that uses context internally but responds only to user request
+                        response_prompt = f"""You are an intelligent assistant. The user has made a specific request, and you have gathered relevant information through various actions. Your job is to provide a direct, focused response to ONLY what the user asked for.
 
 USER REQUEST: {user_input}
 
@@ -233,7 +346,7 @@ Respond directly to the user's request now:"""
             fixed_endpoint = ActionManager._fix_endpoint_url(action.endpoint, action.name)
             
             # Validate that endpoint is a complete URL
-            if not fixed_endpoint.startswith(('http://', 'https://')):
+            if not validate_url(fixed_endpoint):
                 raise ValueError(f"Action '{action.name}' endpoint must be a complete URL starting with http:// or https://. Current endpoint: '{original_endpoint}'. Please update the action with a complete URL like 'https://api.rootly.com/v1/incidents/{{id}}'")
             
             # Use the fixed endpoint
@@ -274,19 +387,8 @@ Respond directly to the user's request now:"""
             if endpoint and parameters:
                 for key, value in parameters.items():
                     if f"{{{key}}}" in endpoint:
-                        # Validate parameter value - warn if it looks like a URL when it should be a simple ID
-                        str_value = str(value)
-                        if str_value.startswith(('http://', 'https://')) and key.lower() in ['id', 'identifier', 'key']:
-                            # Try to extract the ID from the URL
-                            import re
-                            # Look for patterns like "1124-user-authentication-service-failure" at the end of URLs
-                            url_parts = str_value.split('/')
-                            if len(url_parts) > 1:
-                                potential_id = url_parts[-1]
-                                # If it looks like an ID (contains alphanumeric and hyphens), use it
-                                if re.match(r'^[a-zA-Z0-9\-_]+$', potential_id) and len(potential_id) > 3:
-                                    str_value = potential_id
-                                    print(f"⚠️  Warning: Extracted ID '{potential_id}' from URL for parameter '{key}'")
+                        # Validate parameter value - extract ID from URL if needed
+                        str_value = extract_id_from_url(str(value), key)
                         
                         endpoint = endpoint.replace(f"{{{key}}}", str_value)
                         path_params_used.append(key)
@@ -370,8 +472,8 @@ Respond directly to the user's request now:"""
             
             # Return detailed result with context for future actions
             # Mask sensitive data for logging/display
-            safe_headers = ActionManager.mask_sensitive_data(headers)
-            safe_params = ActionManager.mask_sensitive_data(request_params)
+            safe_headers = mask_sensitive_fields(headers)
+            safe_params = mask_sensitive_fields(request_params)
             
             return {
                 "type": "custom_action",
@@ -580,45 +682,6 @@ Respond directly to the user's request now:"""
 
         return headers
 
-    @staticmethod
-    def mask_sensitive_data(data: dict, fields_to_mask: list = None):
-        """Mask sensitive data in dictionaries for logging/display"""
-        if not isinstance(data, dict):
-            return data
-        
-        if fields_to_mask is None:
-            fields_to_mask = ['api_key', 'Authorization', 'password', 'token', 'secret']
-        
-        masked_data = data.copy()
-        for key, value in masked_data.items():
-            if any(sensitive_field.lower() in key.lower() for sensitive_field in fields_to_mask):
-                if isinstance(value, str) and len(value) > 4:
-                    if value.startswith('Bearer '):
-                        token = value[7:]  # Remove 'Bearer ' prefix
-                        masked_data[key] = f"Bearer ***{token[-4:]}" if len(token) > 4 else "Bearer ***"
-                    else:
-                        masked_data[key] = f"***{value[-4:]}" if len(value) > 4 else "***"
-                else:
-                    masked_data[key] = "***"
-            elif isinstance(value, dict):
-                masked_data[key] = ActionManager.mask_sensitive_data(value, fields_to_mask)
-        
-        return masked_data
-
-    @staticmethod
-    def sanitize_yaml_spec(yaml_spec: str, api_key: str = None):
-        """Remove API keys from YAML spec before storing in database"""
-        if not yaml_spec or not api_key:
-            return yaml_spec
-        
-        # Remove actual API key from YAML content
-        sanitized = yaml_spec.replace(api_key, "{{ API_KEY }}")
-        
-        # Also handle Bearer format
-        bearer_format = f"Bearer {api_key}"
-        sanitized = sanitized.replace(bearer_format, "Bearer {{ API_KEY }}")
-        
-        return sanitized
 
     @staticmethod
     def update_action(db: Session, action_id: int, action: schemas.ActionUpdate):
@@ -637,7 +700,7 @@ Respond directly to the user's request now:"""
         # Sanitize YAML spec if it's being updated
         if 'yaml_spec' in update_data and update_data['yaml_spec']:
             api_key = update_data.get('api_key') or db_action.api_key
-            update_data['yaml_spec'] = ActionManager.sanitize_yaml_spec(update_data['yaml_spec'], api_key)
+            update_data['yaml_spec'] = sanitize_yaml_content(update_data['yaml_spec'], api_key)
         
         for field, value in update_data.items():
             setattr(db_action, field, value)

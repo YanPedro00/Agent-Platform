@@ -119,7 +119,7 @@ class LLMManager:
 
     @staticmethod
     def _call_ollama(llm: models.LLM, prompt: str, conversation_history=None, **kwargs):
-        # Ollama tem uma API diferente
+        # Ollama has a different API
         base_url = llm.base_url or "http://localhost:11434"
         endpoint = f"{base_url}/api/generate"
 
@@ -187,7 +187,7 @@ class LLMManager:
             response = requests.post(llm.base_url, headers=headers, json=payload)
             response.raise_for_status()
 
-            # Tenta extrair a resposta de diferentes formatos de API
+            # Try to extract response from different API formats
             result = response.json()
             if "text" in result:
                 return result["text"]

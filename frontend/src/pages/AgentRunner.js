@@ -18,6 +18,9 @@ const AgentRunner = () => {
   const [conversation, setConversation] = useState([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const [waitingForInput, setWaitingForInput] = useState(false);
+  const [sessionContext, setSessionContext] = useState(null);
+  const [waitPrompt, setWaitPrompt] = useState('');
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
@@ -69,8 +72,27 @@ const AgentRunner = () => {
         input: input
       });
 
-      // Only add agent message if there's actually a response
-      if (response.data.response) {
+      // Check if agent is waiting for input
+      if (response.data.wait_required) {
+        // Agent is waiting for additional input
+        const waitMessage = {
+          id: Date.now() + 1,
+          sender: 'agent',
+          content: response.data.wait_message || 'Please provide additional information to continue.',
+          timestamp: new Date().toLocaleTimeString(),
+          isWaiting: true
+        };
+        setConversation(prev => [...prev, waitMessage]);
+        setWaitingForInput(true);
+        // Include actions_used in session_context for continue endpoint
+        const contextWithActions = {
+          ...response.data.session_context,
+          actions_used: response.data.actions_used || []
+        };
+        setSessionContext(contextWithActions);
+        setWaitPrompt(response.data.wait_prompt || 'Please provide additional information:');
+      } else if (response.data.response) {
+        // Normal response
         const agentMessage = {
           id: Date.now() + 1,
           sender: 'agent',
@@ -78,6 +100,8 @@ const AgentRunner = () => {
           timestamp: new Date().toLocaleTimeString()
         };
         setConversation(prev => [...prev, agentMessage]);
+        setWaitingForInput(false);
+        setSessionContext(null);
       } else {
         // Agent has no Respond action or didn't generate a response
         const systemMessage = {
@@ -87,6 +111,8 @@ const AgentRunner = () => {
           timestamp: new Date().toLocaleTimeString()
         };
         setConversation(prev => [...prev, systemMessage]);
+        setWaitingForInput(false);
+        setSessionContext(null);
       }
     } catch (error) {
       const errorMessage = {
@@ -102,8 +128,90 @@ const AgentRunner = () => {
     }
   };
 
+  const handleContinue = async (e) => {
+    e.preventDefault();
+    if (!input.trim()) {
+      setMessage('Please enter additional information');
+      return;
+    }
+
+    setLoading(true);
+    const userMessage = {
+      id: Date.now(),
+      sender: 'user',
+      content: input,
+      timestamp: new Date().toLocaleTimeString()
+    };
+
+    setConversation(prev => [...prev, userMessage]);
+    setInput('');
+    setMessage('');
+
+    try {
+      const response = await api.post(`/agents/${selectedAgent}/continue`, {
+        session_context: sessionContext,
+        additional_input: input
+      });
+
+      // Check if agent is waiting for more input
+      if (response.data.wait_required) {
+        const waitMessage = {
+          id: Date.now() + 1,
+          sender: 'agent',
+          content: response.data.wait_message || 'Please provide additional information to continue.',
+          timestamp: new Date().toLocaleTimeString(),
+          isWaiting: true
+        };
+        setConversation(prev => [...prev, waitMessage]);
+        setSessionContext(response.data.session_context);
+        setWaitPrompt(response.data.wait_prompt || 'Please provide additional information:');
+      } else if (response.data.response) {
+        // Final response
+        const agentMessage = {
+          id: Date.now() + 1,
+          sender: 'agent',
+          content: response.data.response,
+          timestamp: new Date().toLocaleTimeString()
+        };
+        setConversation(prev => [...prev, agentMessage]);
+        setWaitingForInput(false);
+        setSessionContext(null);
+        setWaitPrompt('');
+      } else {
+        // Error or no response
+        const systemMessage = {
+          id: Date.now() + 1,
+          sender: 'system',
+          content: response.data.message || 'Agent could not continue processing',
+          timestamp: new Date().toLocaleTimeString()
+        };
+        setConversation(prev => [...prev, systemMessage]);
+        setWaitingForInput(false);
+        setSessionContext(null);
+        setWaitPrompt('');
+      }
+    } catch (error) {
+      const errorMessage = {
+        id: Date.now() + 1,
+        sender: 'system',
+        content: 'Error: ' + error.message,
+        timestamp: new Date().toLocaleTimeString()
+      };
+      setConversation(prev => [...prev, errorMessage]);
+      setMessage('Error continuing agent: ' + error.message);
+      setWaitingForInput(false);
+      setSessionContext(null);
+      setWaitPrompt('');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const clearConversation = () => {
     setConversation([]);
+    setWaitingForInput(false);
+    setSessionContext(null);
+    setWaitPrompt('');
   };
 
   const renderMessage = (message) => {
@@ -116,12 +224,12 @@ const AgentRunner = () => {
         className={`mb-3 ${isAgent ? 'border-success' : isUser ? 'border-primary' : 'border-warning'}`}
       >
         <Card.Header className={`d-flex justify-content-between align-items-center ${
-          isAgent ? 'bg-success bg-opacity-10' : 
+          isAgent ? (message.isWaiting ? 'bg-info bg-opacity-10' : 'bg-success bg-opacity-10') : 
           isUser ? 'bg-primary bg-opacity-10' : 
           'bg-warning bg-opacity-10'
         }`}>
           <strong>
-            {isAgent ? '🤖 Agent' : isUser ? '👤 You' : '⚠️ System'}
+            {isAgent ? (message.isWaiting ? '⏳ Agent (Waiting)' : '🤖 Agent') : isUser ? '👤 You' : '⚠️ System'}
           </strong>
           <small className="text-muted">{message.timestamp}</small>
         </Card.Header>
@@ -138,7 +246,7 @@ const AgentRunner = () => {
       
       <Card className="mb-4">
         <Card.Body>
-          <Form onSubmit={handleRun}>
+          <Form onSubmit={waitingForInput ? handleContinue : handleRun}>
             <Row>
               <Col md={4}>
                 <Form.Group className="mb-3">
@@ -159,25 +267,25 @@ const AgentRunner = () => {
               </Col>
               <Col md={8}>
                 <Form.Group className="mb-3">
-                  <Form.Label>Input Message</Form.Label>
+                  <Form.Label>{waitingForInput ? waitPrompt : 'Input Message'}</Form.Label>
                   <Form.Control
                     type="text"
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
-                    placeholder="Enter your message here..."
+                    placeholder={waitingForInput ? 'Enter additional information...' : 'Enter your message here...'}
                     required
                   />
                 </Form.Group>
               </Col>
             </Row>
-            <Button type="submit" disabled={loading}>
+            <Button type="submit" disabled={loading} variant={waitingForInput ? 'success' : 'primary'}>
               {loading ? (
                 <>
                   <Spinner animation="border" size="sm" className="me-2" />
-                  Running...
+                  {waitingForInput ? 'Continuing...' : 'Running...'}
                 </>
               ) : (
-                'Run Agent'
+                waitingForInput ? 'Continue Agent' : 'Run Agent'
               )}
             </Button>
           </Form>

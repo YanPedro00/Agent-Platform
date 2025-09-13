@@ -1,0 +1,42 @@
+{
+  "name": "Test Choice Agent",
+  "description": "Agent to test conditional flows",
+  "system_prompt": "You are a test agent",
+  "llm_id": 1,
+  "actions": [
+    {
+      "action_name": "Thinking",
+      "prompt": "Analyze the input",
+      "order": 1,
+      "flow_type": "main"
+    },
+    {
+      "action_name": "Choice",
+      "prompt": "Validate if input contains the word 'test'",
+      "order": 2,
+      "flow_type": "main"
+    }
+  ],
+  "conditional_flows": [
+    {
+      "choice_action": "Choice",
+      "valid_flow": [
+        {
+          "action_name": "Respond",
+          "prompt": "Input is valid - contains test",
+          "order": 1,
+          "flow_type": "valid_flow"
+        }
+      ],
+      "invalid_flow": [
+        {
+          "action_name": "Respond", 
+          "prompt": "Input is invalid - does not contain test",
+          "order": 1,
+          "flow_type": "invalid_flow"
+        }
+      ]
+    }
+  ],
+  "config": {}
+}

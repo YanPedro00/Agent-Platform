@@ -7,6 +7,16 @@ class AgentActionConfig(BaseModel):
 
     action_name: str
     prompt: str  # Prompt template for this action
+    order: Optional[int] = None  # Order in the flow
+    flow_type: Optional[str] = "main"  # main, valid_flow, invalid_flow
+    parent_choice_action: Optional[str] = None  # For conditional flows
+    
+class ConditionalFlow(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    
+    choice_action: str  # Name of the Choice action
+    valid_flow: List[AgentActionConfig]  # Actions to execute if validation passes
+    invalid_flow: List[AgentActionConfig]  # Actions to execute if validation fails
 
 # LLM Schemas
 class LLMBase(BaseModel):
@@ -92,6 +102,7 @@ class AgentBase(BaseModel):
     system_prompt: str
     llm_id: int
     actions: List[AgentActionConfig]  # List of action configurations
+    conditional_flows: Optional[List[ConditionalFlow]] = []  # Conditional flows for Choice actions
     config: Dict[str, Any]
 
 class AgentCreate(AgentBase):
@@ -105,6 +116,7 @@ class AgentUpdate(BaseModel):
     system_prompt: Optional[str] = None
     llm_id: Optional[int] = None
     actions: Optional[List[AgentActionConfig]] = None
+    conditional_flows: Optional[List[ConditionalFlow]] = None
     config: Optional[Dict[str, Any]] = None
     is_active: Optional[bool] = None
 

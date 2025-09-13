@@ -100,6 +100,28 @@ def create_native_actions():
             )
             db.add(respond_action)
 
+        # Wait action
+        wait_action = db.query(models.Action).filter(models.Action.name == "Wait").first()
+        if not wait_action:
+            wait_action = models.Action(
+                name="Wait",
+                description="Pauses execution and prompts user for additional input",
+                action_type="native",
+                config={"prompt": "Please provide additional information to continue: {input}"}
+            )
+            db.add(wait_action)
+
+        # Choice action
+        choice_action = db.query(models.Action).filter(models.Action.name == "Choice").first()
+        if not choice_action:
+            choice_action = models.Action(
+                name="Choice",
+                description="Makes decisions based on validation criteria and creates conditional flows",
+                action_type="native",
+                config={"prompt": "Validate the following information based on the criteria: {input}"}
+            )
+            db.add(choice_action)
+
         db.commit()
     except Exception as e:
         print(f"Error creating native actions: {e}")
@@ -143,8 +165,110 @@ def run_agent(agent_id: int, input_data: schemas.AgentRun, db: Session = Depends
         return AgentManager.run_agent(db=db, agent_id=agent_id, input_data=input_data)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+@app.post("/agents/{agent_id}/continue")
+def continue_agent(agent_id: int, continue_data: dict, db: Session = Depends(get_db)):
+    """Continue agent execution after a Wait action with additional user input"""
+    try:
+        # Extract session context and new input
+        session_context = continue_data.get("session_context", {})
+        additional_input = continue_data.get("additional_input", "")
+        
+        # Ensure session_context has required fields
+        if "action_results" not in session_context:
+            session_context["action_results"] = {}
+        if "thinking_process" not in session_context:
+            session_context["thinking_process"] = []
+        if "conversation_history" not in session_context:
+            session_context["conversation_history"] = []
+        if "extracted_entities" not in session_context:
+            session_context["extracted_entities"] = {}
+        if "session_data" not in session_context:
+            session_context["session_data"] = {}
+        
+        # Update the context with new input
+        original_input = session_context.get("user_input", "")
+        combined_input = f"{original_input} {additional_input}".strip()
+        session_context["user_input"] = combined_input
+        session_context["additional_inputs"] = session_context.get("additional_inputs", [])
+        session_context["additional_inputs"].append(additional_input)
+        
+        # Get the agent
+        agent = db.query(models.Agent).filter(models.Agent.id == agent_id).first()
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+            
+        # Get the LLM
+        llm = db.query(models.LLM).filter(models.LLM.id == agent.llm_id).first()
+        if not llm:
+            raise HTTPException(status_code=404, detail="LLM not found")
+        
+        # Continue execution from where it left off
+        # Find the next action after the last executed action
+        actions_used = session_context.get("actions_used", [])
+        if not actions_used:
+            # If no actions were used, start from the beginning
+            return AgentManager.run_agent(db=db, agent_id=agent_id, input_data=schemas.AgentRun(input=combined_input))
+        
+        # Find the next action to execute
+        last_action_index = len(actions_used) - 1
+        if last_action_index + 1 < len(agent.actions):
+            # Continue with remaining actions
+            remaining_actions = agent.actions[last_action_index + 1:]
+            
+            # Execute remaining actions
+            agent_manager = AgentManager()
+            execution_result = agent_manager._execute_action_flow(
+                db, agent, remaining_actions, session_context, llm, schemas.AgentRun(input=combined_input)
+            )
+            
+            # Merge with previous results
+            all_actions_used = actions_used + execution_result["actions_used"]
+            all_background_actions = session_context.get("background_actions", []) + execution_result["background_actions"]
+            all_user_facing_actions = session_context.get("user_facing_actions", []) + execution_result["user_facing_actions"]
+            
+            # Handle Wait action result if present
+            if execution_result.get("wait_required"):
+                return {
+                    "wait_required": True,
+                    "wait_message": execution_result["wait_message"],
+                    "wait_prompt": execution_result["wait_prompt"],
+                    "session_context": execution_result["shared_context"],
+                    "actions_used": all_actions_used,
+                    "background_actions": all_background_actions,
+                    "user_facing_actions": all_user_facing_actions
+                }
+            
+            # Extract final response
+            final_user_message = None
+            if execution_result["user_facing_actions"]:
+                for action in reversed(execution_result["user_facing_actions"]):
+                    if action["action"] == "Respond" and action["result"].get("type") == "response":
+                        final_user_message = action["result"]["content"]
+                        break
+            
+            return {
+                "response": final_user_message,
+                "actions_used": all_actions_used,
+                "background_actions": all_background_actions,
+                "user_facing_actions": all_user_facing_actions,
+                "context_summary": {
+                    "entities_extracted": len(execution_result["shared_context"].get("extracted_entities", {})),
+                    "thinking_steps": len(execution_result["shared_context"].get("thinking_process", [])),
+                    "data_retrieved": len([k for k in execution_result["shared_context"].keys() if k.endswith("_data")])
+                }
+            }
+        else:
+            # No more actions to execute
+            return {
+                "response": "No more actions to execute",
+                "actions_used": actions_used,
+                "background_actions": session_context.get("background_actions", []),
+                "user_facing_actions": session_context.get("user_facing_actions", [])
+            }
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error continuing agent execution: {str(e)}")
 
 # Action endpoints
 @app.post("/actions/", response_model=schemas.Action)
@@ -154,6 +278,65 @@ def create_action(action: schemas.ActionCreate, db: Session = Depends(get_db)):
 @app.get("/actions/", response_model=List[schemas.Action])
 def read_actions(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     return ActionManager.get_actions(db=db, skip=skip, limit=limit)
+
+@app.get("/actions/native")
+def get_native_actions():
+    """Get available native actions with their descriptions and parameters"""
+    return {
+        "native_actions": [
+            {
+                "name": "Thinking",
+                "description": "Analyzes user input and extracts key information for subsequent actions",
+                "type": "native",
+                "background": True,
+                "parameters": {
+                    "input": {"type": "string", "required": True, "description": "User input to analyze"}
+                },
+                "example_prompt": "Analyze the user's request and extract the incident ID they want to know about"
+            },
+            {
+                "name": "Respond",
+                "description": "Generates user-facing responses using the accumulated context",
+                "type": "native",
+                "background": False,
+                "parameters": {
+                    "input": {"type": "string", "required": True, "description": "User input to respond to"}
+                },
+                "example_prompt": "Present the incident information to the user in a clear and organized way"
+            },
+            {
+                "name": "Wait",
+                "description": "Pauses execution and prompts user for additional input",
+                "type": "native",
+                "background": False,
+                "parameters": {
+                    "message": {"type": "string", "required": False, "description": "Message to display to user"},
+                    "prompt": {"type": "string", "required": False, "description": "Prompt for additional input"}
+                },
+                "example_prompt": "Please provide the incident ID you want to investigate",
+                "special_properties": {
+                    "pause_execution": True,
+                    "user_input_required": True
+                }
+            },
+            {
+                "name": "Choice",
+                "description": "Makes decisions based on validation criteria and creates conditional flows",
+                "type": "native",
+                "background": True,
+                "parameters": {
+                    "validation_criteria": {"type": "string", "required": True, "description": "Criteria to validate against"},
+                    "input": {"type": "string", "required": True, "description": "Input to validate"}
+                },
+                "example_prompt": "Validate if the provided incident ID exists and is accessible",
+                "special_properties": {
+                    "conditional_flow": True,
+                    "creates_branches": True,
+                    "flows": ["valid_flow", "invalid_flow"]
+                }
+            }
+        ]
+    }
 
 # LLM endpoints - Adicionar PUT e DELETE
 @app.put("/llms/{llm_id}", response_model=schemas.LLM)

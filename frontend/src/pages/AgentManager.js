@@ -24,6 +24,7 @@ const AgentManager = () => {
     system_prompt: 'You are a helpful assistant that can use available actions to help users.',
     llm_id: '',
     actions: [],
+    conditional_flows: [],
     config: {}
   });
   const [editFormData, setEditFormData] = useState({
@@ -49,6 +50,16 @@ const AgentManager = () => {
   });
   const [selectedEditAction, setSelectedEditAction] = useState('');
   const [editActionPrompt, setEditActionPrompt] = useState('');
+  
+  // Conditional Flow Management States
+  const [showConditionalFlowModal, setShowConditionalFlowModal] = useState(false);
+  const [currentChoiceAction, setCurrentChoiceAction] = useState('');
+  const [validFlowActions, setValidFlowActions] = useState([]);
+  const [invalidFlowActions, setInvalidFlowActions] = useState([]);
+  const [selectedValidAction, setSelectedValidAction] = useState('');
+  const [selectedInvalidAction, setSelectedInvalidAction] = useState('');
+  const [validActionPrompt, setValidActionPrompt] = useState('');
+  const [invalidActionPrompt, setInvalidActionPrompt] = useState('');
 
   useEffect(() => {
     fetchAgents();
@@ -76,8 +87,25 @@ const AgentManager = () => {
 
   const fetchActions = async () => {
     try {
-      const response = await api.get('/actions/');
-      setAvailableActions(response.data);
+      // Fetch custom actions
+      const customActionsResponse = await api.get('/actions/');
+      
+      // Fetch native actions
+      const nativeActionsResponse = await api.get('/actions/native');
+      
+      // Filter out custom actions that have the same name as native actions
+      const nativeActionNames = nativeActionsResponse.data.native_actions.map(action => action.name);
+      const filteredCustomActions = customActionsResponse.data.filter(
+        action => !nativeActionNames.includes(action.name)
+      );
+      
+      // Combine native actions first, then filtered custom actions
+      const allActions = [
+        ...nativeActionsResponse.data.native_actions,
+        ...filteredCustomActions
+      ];
+      
+      setAvailableActions(allActions);
     } catch (error) {
       console.error('Error fetching actions:', error);
     }
@@ -161,11 +189,39 @@ const AgentManager = () => {
       return;
     }
 
+    const selectedActionData = availableActions.find(action => action.name === selectedAction);
+    const isChoiceAction = selectedActionData?.special_properties?.creates_branches;
+
     const actionConfig = {
       action_name: selectedAction,
       prompt: actionPrompt,
-      order: formData.actions.length + 1
+      order: formData.actions.length + 1,
+      flow_type: "main"
     };
+
+    // If it's a Choice action, we need to handle conditional flows
+    if (isChoiceAction) {
+      // Add a note that this creates branches
+      actionConfig.creates_branches = true;
+      actionConfig.validation_criteria = actionPrompt;
+      
+      // Open conditional flow modal
+      setCurrentChoiceAction(selectedAction);
+      setValidFlowActions([]);
+      setInvalidFlowActions([]);
+      setShowConditionalFlowModal(true);
+      setShowFlowModal(false);
+      
+      // Add the choice action to the main flow
+      setFormData({
+        ...formData,
+        actions: [...formData.actions, actionConfig]
+      });
+      
+      setSelectedAction('');
+      setActionPrompt('');
+      return;
+    }
 
     setFormData({
       ...formData,
@@ -174,6 +230,7 @@ const AgentManager = () => {
 
     setSelectedAction('');
     setActionPrompt('');
+    setShowFlowModal(false);
   };
 
   const removeActionFromFlow = (index) => {
@@ -212,6 +269,87 @@ const AgentManager = () => {
   const getActionDescription = (actionName) => {
     const action = availableActions.find(a => a.name === actionName);
     return action ? action.description : 'No description available';
+  };
+
+  // Conditional Flow Management Functions
+  const addActionToValidFlow = () => {
+    if (!selectedValidAction) {
+      setMessage('Please select an action for the valid flow');
+      return;
+    }
+
+    const actionConfig = {
+      action_name: selectedValidAction,
+      prompt: validActionPrompt,
+      order: validFlowActions.length + 1,
+      flow_type: "valid_flow"
+    };
+
+    setValidFlowActions([...validFlowActions, actionConfig]);
+    setSelectedValidAction('');
+    setValidActionPrompt('');
+  };
+
+  const addActionToInvalidFlow = () => {
+    if (!selectedInvalidAction) {
+      setMessage('Please select an action for the invalid flow');
+      return;
+    }
+
+    const actionConfig = {
+      action_name: selectedInvalidAction,
+      prompt: invalidActionPrompt,
+      order: invalidFlowActions.length + 1,
+      flow_type: "invalid_flow"
+    };
+
+    setInvalidFlowActions([...invalidFlowActions, actionConfig]);
+    setSelectedInvalidAction('');
+    setInvalidActionPrompt('');
+  };
+
+  const removeActionFromValidFlow = (index) => {
+    const newActions = [...validFlowActions];
+    newActions.splice(index, 1);
+    setValidFlowActions(newActions);
+  };
+
+  const removeActionFromInvalidFlow = (index) => {
+    const newActions = [...invalidFlowActions];
+    newActions.splice(index, 1);
+    setInvalidFlowActions(newActions);
+  };
+
+  const saveConditionalFlow = () => {
+    if (validFlowActions.length === 0 && invalidFlowActions.length === 0) {
+      setMessage('Please add at least one action to either the valid or invalid flow');
+      return;
+    }
+
+    // Check if at least one flow has a Respond action OR if main flow has Wait action
+    const hasRespondInValid = validFlowActions.some(action => action.action_name === 'Respond');
+    const hasRespondInInvalid = invalidFlowActions.some(action => action.action_name === 'Respond');
+    const hasRespondInMainFlow = formData.actions.some(action => action.action_name === 'Respond');
+    const hasWaitInMainFlow = formData.actions.some(action => action.action_name === 'Wait');
+
+    if (!hasRespondInValid && !hasRespondInInvalid && !hasRespondInMainFlow && !hasWaitInMainFlow) {
+      setMessage('At least one flow must contain a "Respond" action OR the main flow must have a "Wait" action for user interaction');
+      return;
+    }
+
+    const conditionalFlow = {
+      choice_action: currentChoiceAction,
+      valid_flow: validFlowActions,
+      invalid_flow: invalidFlowActions
+    };
+
+    setFormData({
+      ...formData,
+      conditional_flows: [...formData.conditional_flows, conditionalFlow]
+    });
+
+    setShowConditionalFlowModal(false);
+    setMessage(`Conditional flows created for "${currentChoiceAction}" action!`);
   };
 
   // Agent Actions Management Functions
@@ -349,13 +487,40 @@ const AgentManager = () => {
                       <div className="d-flex align-items-center">
                         <Badge bg="secondary" className="me-2">Step {index + 1}</Badge>
                         <strong>{action.action_name}</strong>
+                        {action.creates_branches && (
+                          <Badge bg="warning" className="ms-2">Creates Branches</Badge>
+                        )}
+                        {action.action_name === 'Wait' && (
+                          <Badge bg="info" className="ms-2">Pauses Execution</Badge>
+                        )}
                       </div>
                       <div className="mt-1">
                         <small className="text-muted">{getActionDescription(action.action_name)}</small>
                       </div>
                       {action.prompt && (
                         <div className="mt-2">
-                          <small><strong>Prompt:</strong> {action.prompt}</small>
+                          <small><strong>
+                            {action.action_name === 'Choice' ? 'Validation Criteria:' : 
+                             action.action_name === 'Wait' ? 'Wait Message:' : 'Prompt:'}
+                          </strong> {action.prompt}</small>
+                        </div>
+                      )}
+                      {action.creates_branches && (
+                        <div className="mt-2">
+                          <small className="text-info">
+                            <strong>Note:</strong> This action will create conditional flows (valid/invalid paths)
+                          </small>
+                          {/* Show conditional flows if they exist */}
+                          {formData.conditional_flows.find(flow => flow.choice_action === action.action_name) && (
+                            <div className="mt-2">
+                              <Badge bg="success" className="me-1">
+                                Valid Flow: {formData.conditional_flows.find(flow => flow.choice_action === action.action_name)?.valid_flow.length || 0} actions
+                              </Badge>
+                              <Badge bg="danger">
+                                Invalid Flow: {formData.conditional_flows.find(flow => flow.choice_action === action.action_name)?.invalid_flow.length || 0} actions
+                              </Badge>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -632,24 +797,35 @@ const AgentManager = () => {
             >
               <option value="">Choose an action</option>
               {availableActions.map(action => (
-                <option key={action.id} value={action.name}>
-                  {action.name} ({action.action_type})
+                <option key={action.id || action.name} value={action.name}>
+                  {action.name} ({action.type || action.action_type || 'custom'})
+                  {action.special_properties?.creates_branches && ' - Creates Branches'}
+                  {action.special_properties?.pause_execution && ' - Pauses Execution'}
                 </option>
               ))}
             </Form.Select>
           </Form.Group>
 
           <Form.Group className="mb-3">
-            <Form.Label>Prompt/Instructions</Form.Label>
+            <Form.Label>
+              {selectedAction === 'Choice' ? 'Validation Criteria' : 
+               selectedAction === 'Wait' ? 'Wait Message' : 'Prompt/Instructions'}
+            </Form.Label>
             <Form.Control
               as="textarea"
               rows={3}
               value={actionPrompt}
               onChange={(e) => setActionPrompt(e.target.value)}
-              placeholder="Enter instructions for this action (e.g., 'Think about how to handle this request')"
+              placeholder={
+                selectedAction === 'Choice' ? 'Enter criteria to validate (e.g., "Check if incident ID exists and is accessible")' :
+                selectedAction === 'Wait' ? 'Enter message to show user (e.g., "Please provide the incident ID")' :
+                'Enter instructions for this action (e.g., "Think about how to handle this request")'
+              }
             />
             <Form.Text className="text-muted">
-              This prompt will guide the LLM on how to use this action.
+              {selectedAction === 'Choice' ? 'This action will create two conditional flows: one for valid results and one for invalid results.' :
+               selectedAction === 'Wait' ? 'This action will pause execution and wait for additional user input.' :
+               'This prompt will guide the LLM on how to use this action.'}
             </Form.Text>
           </Form.Group>
         </Modal.Body>
@@ -682,8 +858,10 @@ const AgentManager = () => {
                     >
                       <option value="">Choose an action</option>
                       {availableActions.map(action => (
-                        <option key={action.id} value={action.name}>
-                          {action.name} ({action.action_type})
+                        <option key={action.id || action.name} value={action.name}>
+                          {action.name} ({action.type || action.action_type || 'custom'})
+                          {action.special_properties?.creates_branches && ' - Creates Branches'}
+                          {action.special_properties?.pause_execution && ' - Pauses Execution'}
                         </option>
                       ))}
                     </Form.Select>
@@ -821,6 +999,206 @@ const AgentManager = () => {
           </Button>
           <Button variant="primary" onClick={handleSaveAgentActions}>
             Save Changes
+          </Button>
+        </Modal.Footer>
+      </Modal>
+
+      {/* Conditional Flow Modal */}
+      <Modal show={showConditionalFlowModal} onHide={() => setShowConditionalFlowModal(false)} size="xl">
+        <Modal.Header closeButton>
+          <Modal.Title>Configure Conditional Flows for "{currentChoiceAction}"</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          <Alert variant="info">
+            <strong>How it works:</strong> When the "{currentChoiceAction}" action validates the input:
+            <ul className="mb-0 mt-2">
+              <li><strong>Valid Flow:</strong> Actions to execute when validation passes</li>
+              <li><strong>Invalid Flow:</strong> Actions to execute when validation fails</li>
+            </ul>
+          </Alert>
+
+          <Alert variant="warning">
+            <strong>⚠️ Important:</strong> At least one flow (valid or invalid) must contain a <strong>"Respond"</strong> action to generate responses for the user, OR your main flow should have a <strong>"Wait"</strong> action for user interaction.
+          </Alert>
+
+          <Row>
+            {/* Valid Flow Column */}
+            <Col md={6}>
+              <Card className="h-100">
+                <Card.Header className="bg-success text-white">
+                  <h5 className="mb-0">✅ Valid Flow</h5>
+                  <small>Actions when validation passes</small>
+                </Card.Header>
+                <Card.Body>
+                  {/* Add Action to Valid Flow */}
+                  <Form.Group className="mb-3">
+                    <Form.Label>Add Action</Form.Label>
+                    <Form.Select
+                      value={selectedValidAction}
+                      onChange={(e) => setSelectedValidAction(e.target.value)}
+                    >
+                      <option value="">Choose an action</option>
+                      {availableActions.map(action => (
+                        <option key={action.id || action.name} value={action.name}>
+                          {action.name} ({action.type || action.action_type || 'custom'})
+                        </option>
+                      ))}
+                    </Form.Select>
+                  </Form.Group>
+
+                  <Form.Group className="mb-3">
+                    <Form.Label>Prompt/Instructions</Form.Label>
+                    <Form.Control
+                      as="textarea"
+                      rows={2}
+                      value={validActionPrompt}
+                      onChange={(e) => setValidActionPrompt(e.target.value)}
+                      placeholder="Enter instructions for this action"
+                    />
+                  </Form.Group>
+
+                  <Button 
+                    variant="success" 
+                    onClick={addActionToValidFlow}
+                    className="w-100 mb-3"
+                    disabled={!selectedValidAction}
+                  >
+                    Add to Valid Flow
+                  </Button>
+
+                  {/* Valid Flow Actions List */}
+                  <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                    {validFlowActions.length === 0 ? (
+                      <div className="text-center text-muted py-3">
+                        <small>No actions in valid flow yet</small>
+                      </div>
+                    ) : (
+                      <ListGroup>
+                        {validFlowActions.map((action, index) => (
+                          <ListGroup.Item key={index}>
+                            <div className="d-flex justify-content-between align-items-start">
+                              <div className="flex-grow-1">
+                                <div className="d-flex align-items-center">
+                                  <Badge bg="success" className="me-2">Step {index + 1}</Badge>
+                                  <strong>{action.action_name}</strong>
+                                </div>
+                                {action.prompt && (
+                                  <div className="mt-1">
+                                    <small className="text-muted">{action.prompt}</small>
+                                  </div>
+                                )}
+                              </div>
+                              <Button
+                                variant="outline-danger"
+                                size="sm"
+                                onClick={() => removeActionFromValidFlow(index)}
+                              >
+                                ×
+                              </Button>
+                            </div>
+                          </ListGroup.Item>
+                        ))}
+                      </ListGroup>
+                    )}
+                  </div>
+                </Card.Body>
+              </Card>
+            </Col>
+
+            {/* Invalid Flow Column */}
+            <Col md={6}>
+              <Card className="h-100">
+                <Card.Header className="bg-danger text-white">
+                  <h5 className="mb-0">❌ Invalid Flow</h5>
+                  <small>Actions when validation fails</small>
+                </Card.Header>
+                <Card.Body>
+                  {/* Add Action to Invalid Flow */}
+                  <Form.Group className="mb-3">
+                    <Form.Label>Add Action</Form.Label>
+                    <Form.Select
+                      value={selectedInvalidAction}
+                      onChange={(e) => setSelectedInvalidAction(e.target.value)}
+                    >
+                      <option value="">Choose an action</option>
+                      {availableActions.map(action => (
+                        <option key={action.id || action.name} value={action.name}>
+                          {action.name} ({action.type || action.action_type || 'custom'})
+                        </option>
+                      ))}
+                    </Form.Select>
+                  </Form.Group>
+
+                  <Form.Group className="mb-3">
+                    <Form.Label>Prompt/Instructions</Form.Label>
+                    <Form.Control
+                      as="textarea"
+                      rows={2}
+                      value={invalidActionPrompt}
+                      onChange={(e) => setInvalidActionPrompt(e.target.value)}
+                      placeholder="Enter instructions for this action"
+                    />
+                  </Form.Group>
+
+                  <Button 
+                    variant="danger" 
+                    onClick={addActionToInvalidFlow}
+                    className="w-100 mb-3"
+                    disabled={!selectedInvalidAction}
+                  >
+                    Add to Invalid Flow
+                  </Button>
+
+                  {/* Invalid Flow Actions List */}
+                  <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                    {invalidFlowActions.length === 0 ? (
+                      <div className="text-center text-muted py-3">
+                        <small>No actions in invalid flow yet</small>
+                      </div>
+                    ) : (
+                      <ListGroup>
+                        {invalidFlowActions.map((action, index) => (
+                          <ListGroup.Item key={index}>
+                            <div className="d-flex justify-content-between align-items-start">
+                              <div className="flex-grow-1">
+                                <div className="d-flex align-items-center">
+                                  <Badge bg="danger" className="me-2">Step {index + 1}</Badge>
+                                  <strong>{action.action_name}</strong>
+                                </div>
+                                {action.prompt && (
+                                  <div className="mt-1">
+                                    <small className="text-muted">{action.prompt}</small>
+                                  </div>
+                                )}
+                              </div>
+                              <Button
+                                variant="outline-danger"
+                                size="sm"
+                                onClick={() => removeActionFromInvalidFlow(index)}
+                              >
+                                ×
+                              </Button>
+                            </div>
+                          </ListGroup.Item>
+                        ))}
+                      </ListGroup>
+                    )}
+                  </div>
+                </Card.Body>
+              </Card>
+            </Col>
+          </Row>
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="secondary" onClick={() => setShowConditionalFlowModal(false)}>
+            Cancel
+          </Button>
+          <Button 
+            variant="primary" 
+            onClick={saveConditionalFlow}
+            disabled={validFlowActions.length === 0 && invalidFlowActions.length === 0}
+          >
+            Save Conditional Flows
           </Button>
         </Modal.Footer>
       </Modal>
